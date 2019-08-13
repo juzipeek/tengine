@@ -34,23 +34,25 @@ typedef struct {
 
 
 typedef struct {
-    ngx_flag_t                     enable;
+    ngx_flag_t                     enable; // dyups 是否被启用
     ngx_flag_t                     trylock;
+    // 存储所有的 upstream{} 配置
     ngx_array_t                    dy_upstreams;/* ngx_http_dyups_srv_conf_t */
-    ngx_str_t                      shm_name;
-    ngx_uint_t                     shm_size;
-    ngx_msec_t                     read_msg_timeout;
-    ngx_flag_t                     read_msg_log;
+    ngx_str_t                      shm_name; // 共享内存名
+    ngx_uint_t                     shm_size; // 共享内存大小
+    ngx_msec_t                     read_msg_timeout; // 消息处理超时时间
+    ngx_flag_t                     read_msg_log;  // 
 } ngx_http_dyups_main_conf_t;
 
 
 typedef struct {
-    ngx_uint_t                           ref;
+    ngx_uint_t                           ref; // 引用计数？
     ngx_http_upstream_init_peer_pt       init;
 } ngx_http_dyups_upstream_srv_conf_t;
 
-
+// upstream 操作上下文
 typedef struct {
+    // 当前 upstream {} 的 ngx_http_dyups_srv_conf_t
     void                                *data;
     ngx_http_dyups_upstream_srv_conf_t  *scf;
     ngx_event_get_peer_pt                get;
@@ -73,7 +75,7 @@ typedef struct ngx_dyups_shctx_s {
     ngx_dyups_status_t                  *status;
 } ngx_dyups_shctx_t;
 
-
+// 全局共享内存配置
 typedef struct ngx_dyups_global_ctx_s {
     ngx_event_t                          msg_timer;
     ngx_slab_pool_t                     *shpool;
@@ -87,7 +89,7 @@ typedef struct ngx_dyups_msg_s {
     ngx_str_t                            content;
     ngx_int_t                            count;
     ngx_uint_t                           flag;
-    ngx_pid_t                           *pid;
+    ngx_pid_t                           *pid; // 有 worker 数量个元素
 } ngx_dyups_msg_t;
 
 
@@ -265,7 +267,7 @@ ngx_http_dyups_pre_conf(ngx_conf_t *cf)
     return NGX_OK;
 }
 
-
+// 设置当前 location 处理 upstream 控制指令
 static char *
 ngx_http_dyups_interface(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -275,12 +277,12 @@ ngx_http_dyups_interface(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     dmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_dyups_module);
     clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
     clcf->handler = ngx_http_dyups_interface_handler;
-    dmcf->enable = 1;
+    dmcf->enable = 1; // 标记启用 upstream 动态配置功能
 
     return NGX_CONF_OK;
 }
 
-
+// create main_conf
 static void *
 ngx_http_dyups_create_main_conf(ngx_conf_t *cf)
 {
@@ -320,7 +322,7 @@ ngx_http_dyups_create_main_conf(ngx_conf_t *cf)
     return dmcf;
 }
 
-
+// after process cmd, init main_conf
 static char *
 ngx_http_dyups_init_main_conf(ngx_conf_t *cf, void *conf)
 {
@@ -351,7 +353,7 @@ ngx_http_dyups_init_main_conf(ngx_conf_t *cf, void *conf)
     return ngx_http_dyups_init_shm(cf, conf);
 }
 
-
+// 设置共享内存初始化回调函数
 static char *
 ngx_http_dyups_init_shm(ngx_conf_t *cf, void *conf)
 {
@@ -361,6 +363,7 @@ ngx_http_dyups_init_shm(ngx_conf_t *cf, void *conf)
 
     ngx_http_dyups_shm_generation++;
 
+    // 共享内存名字
     if (ngx_http_dyups_get_shm_name(&dmcf->shm_name, cf->pool,
                                      ngx_http_dyups_shm_generation)
         != NGX_OK)
@@ -384,7 +387,7 @@ ngx_http_dyups_init_shm(ngx_conf_t *cf, void *conf)
     return NGX_CONF_OK;
 }
 
-
+// 创建共享内存名字
 static ngx_int_t
 ngx_http_dyups_get_shm_name(ngx_str_t *shm_name, ngx_pool_t *pool,
     ngx_uint_t generation)
@@ -404,7 +407,9 @@ ngx_http_dyups_get_shm_name(ngx_str_t *shm_name, ngx_pool_t *pool,
     return NGX_OK;
 }
 
-
+// 共享内存初始化
+// 在共享内存上创建 ngx_dyups_shctx_t 类型的模块上下文
+// 初始化指令队列
 static ngx_int_t
 ngx_http_dyups_init_shm_zone(ngx_shm_zone_t *shm_zone, void *data)
 {
@@ -429,7 +434,7 @@ ngx_http_dyups_init_shm_zone(ngx_shm_zone_t *shm_zone, void *data)
     return NGX_OK;
 }
 
-
+// create srv conf
 static void *
 ngx_http_dyups_create_srv_conf(ngx_conf_t *cf)
 {
@@ -446,7 +451,7 @@ ngx_http_dyups_create_srv_conf(ngx_conf_t *cf)
     return conf;
 }
 
-
+// post config
 static ngx_int_t
 ngx_http_dyups_init(ngx_conf_t *cf)
 {
@@ -490,6 +495,7 @@ ngx_http_dyups_init(ngx_conf_t *cf)
         }
     }
 
+    // ngx_http_dyups_deleted_upstream 是给 lua 模块使用？
     /* alloc a dummy upstream */
 
     ngx_memzero(&ngx_http_dyups_deleted_upstream,
@@ -534,7 +540,8 @@ ngx_http_dyups_init(ngx_conf_t *cf)
 #endif
 }
 
-
+// 进程初始化
+// 
 static ngx_int_t
 ngx_http_dyups_init_process(ngx_cycle_t *cycle)
 {
@@ -561,6 +568,7 @@ ngx_http_dyups_init_process(ngx_cycle_t *cycle)
 
     ngx_http_dyups_api_enable = 1;
 
+    // 创建指令处理定时器
     timer = &ngx_dyups_global_ctx.msg_timer;
     ngx_memzero(timer, sizeof(ngx_event_t));
 
@@ -575,6 +583,7 @@ ngx_http_dyups_init_process(ngx_cycle_t *cycle)
 
     ngx_shmtx_lock(&shpool->mutex);
 
+    // 创建 status 数组
     if (sh->status == NULL) {
         sh->status = ngx_slab_alloc_locked(shpool,
                            sizeof(ngx_dyups_status_t) * ccf->worker_processes);
@@ -591,12 +600,14 @@ ngx_http_dyups_init_process(ngx_cycle_t *cycle)
         return NGX_OK;
     }
 
+    // sh->version 不为零说明已经处理过 upstream 新增、删除指令
     if (sh->version != 0) {
         ngx_shmtx_unlock(&shpool->mutex);
 
         ngx_log_error(NGX_LOG_ALERT, cycle->log, 0,
                       "[dyups] process start after abnormal exits");
-
+        // usleep 为什么要使用 usleep？
+        // 保证其他进程已经触发了指令处理定时器
         ngx_msleep(dmcf->read_msg_timeout * 2);
 
         ngx_time_update();
@@ -605,6 +616,7 @@ ngx_http_dyups_init_process(ngx_cycle_t *cycle)
 
         ngx_shmtx_lock(&shpool->mutex);
 
+        // 从 sh->status 数组中找一个可用 status 使用
         if (sh->status == NULL) {
             ngx_shmtx_unlock(&shpool->mutex);
             return NGX_OK;
@@ -693,7 +705,7 @@ ngx_http_dyups_exit_process(ngx_cycle_t *cycle)
     }
 }
 
-
+// 接口处理函数
 static ngx_int_t
 ngx_http_dyups_interface_handler(ngx_http_request_t *r)
 {
@@ -707,15 +719,18 @@ ngx_http_dyups_interface_handler(ngx_http_request_t *r)
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
+    // 查看 upstream 状态指令处理
     if (r->method == NGX_HTTP_GET) {
         ngx_http_dyups_read_msg(timer);
         return ngx_http_dyups_do_get(r, res);
     }
 
+    // 删除指令处理；删除整个 upstream
     if (r->method == NGX_HTTP_DELETE) {
         return ngx_http_dyups_do_delete(r, res);
     }
 
+    // 更新某个 upstream
     return ngx_http_dyups_interface_read_body(r);
 }
 
@@ -757,6 +772,7 @@ ngx_dyups_delete_upstream(ngx_str_t *name, ngx_str_t *rv)
         goto finish;
     }
 
+    // 将消息写入 msg 队列
     rc = ngx_http_dyups_send_msg(name, NULL, NGX_DYUPS_DELETE);
     if (rc != NGX_OK) {
         ngx_str_set(rv, "alert: delte success but not sync to other process");
@@ -1207,7 +1223,10 @@ finish:
     ngx_http_dyups_send_response(r, status, &rv);
 }
 
-
+// 更新 upstream 中的 server 信息
+// @param name      upstream name
+// @param buf       body; server 信息
+// @param rv        处理结果
 ngx_int_t
 ngx_dyups_update_upstream(ngx_str_t *name, ngx_buf_t *buf, ngx_str_t *rv)
 {
@@ -1241,14 +1260,17 @@ ngx_dyups_update_upstream(ngx_str_t *name, ngx_buf_t *buf, ngx_str_t *rv)
 
     ngx_http_dyups_read_msg_locked(timer);
 
+    // 先用创建假的 upstream 进行创建测试
     status = ngx_dyups_sandbox_update(buf, rv);
     if (status != NGX_HTTP_OK) {
         goto finish;
     }
 
+    // 进行实际的更新动作
     status = ngx_dyups_do_update(name, buf, rv);
     if (status == NGX_HTTP_OK) {
 
+        // 将消息发送到消息队列中
         if (ngx_http_dyups_send_msg(name, buf, NGX_DYUPS_ADD)) {
             ngx_str_set(rv, "alert: update success "
                         "but not sync to other process");
@@ -1297,7 +1319,7 @@ ngx_dyups_do_update(ngx_str_t *name, ngx_buf_t *buf, ngx_str_t *rv)
 
     if (idx == -1) {
         /* need create a new upstream */
-
+        // 创建新的 upstram
         ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
                       "[dyups] create upstream %V", name);
 
@@ -1317,6 +1339,7 @@ ngx_dyups_do_update(ngx_str_t *name, ngx_buf_t *buf, ngx_str_t *rv)
         idx = umcf->upstreams.nelts - 1;
     }
 
+    // 初始化新创建的 upstream 配置
     duscf->idx = idx;
     rc = ngx_dyups_init_upstream(duscf, name, idx);
 
@@ -1353,7 +1376,8 @@ ngx_dyups_sandbox_update(ngx_buf_t *buf, ngx_str_t *rv)
     return rc;
 }
 
-
+// 使用 ngx_conf_parse 解析包体，
+// buf 内是 server 定义
 static char *
 ngx_dyups_parse_upstream(ngx_conf_t *cf, ngx_buf_t *buf)
 {
@@ -1375,7 +1399,7 @@ ngx_dyups_parse_upstream(ngx_conf_t *cf, ngx_buf_t *buf)
     conf_file.buffer = &b;
 
     cf->conf_file = &conf_file;
-
+    // 从 ngx_buf_t 解析配置
     rc = ngx_conf_parse(cf, NULL);
     if (rc != NGX_CONF_OK) {
         return rc;
@@ -1474,7 +1498,7 @@ ngx_dyups_add_server(ngx_http_dyups_srv_conf_t *duscf, ngx_buf_t *buf)
     cf.log = ngx_cycle->log;
     cf.ctx = duscf->ctx;
 
-
+    // 对新创建的 upstream{} 进行 init 操作
     init = uscf->peer.init_upstream ? uscf->peer.init_upstream:
         ngx_http_upstream_init_round_robin;
 
@@ -1581,7 +1605,10 @@ ngx_dyups_find_upstream(ngx_str_t *name, ngx_int_t *idx)
     return duscf_del;
 }
 
-
+// 初始化（进行指令解析）新创建的 upstream 配置
+// @param duscf         新创建的 ngx_http_dyups_srv_conf_t
+// @param name          新创建的 upstream 名字
+// @param idx           新创建的 upstream 在 ngx_http_upstream_module 中的索引
 static ngx_int_t
 ngx_dyups_init_upstream(ngx_http_dyups_srv_conf_t *duscf, ngx_str_t *name,
     ngx_uint_t index)
@@ -1690,6 +1717,7 @@ ngx_dyups_init_upstream(ngx_http_dyups_srv_conf_t *duscf, ngx_str_t *name,
     duscf->ctx = ctx;
     duscf->deleted = 0;
 
+    // 在红黑树中插入节点
     ngx_dyups_add_upstream_top_filter(umcf, uscf);
 
     return NGX_OK;
@@ -1869,7 +1897,7 @@ ngx_http_dyups_read_body_from_file(ngx_http_request_t *r)
     return body;
 }
 
-
+// 解析出 uri 中路径，并存储动态数组中
 ngx_array_t *
 ngx_dyups_parse_path(ngx_pool_t *pool, ngx_str_t *path)
 {
@@ -1920,7 +1948,7 @@ ngx_dyups_parse_path(ngx_pool_t *pool, ngx_str_t *path)
     return array;
 }
 
-
+// 对原始 upstream 操作封装
 static ngx_int_t
 ngx_http_dyups_init_peer(ngx_http_request_t *r,
     ngx_http_upstream_srv_conf_t *us)
@@ -2040,7 +2068,7 @@ ngx_http_dyups_clean_request(void *data)
                    "[dyups] http clean request count %i", *ref);
 }
 
-
+// 触发定时器
 static void
 ngx_http_dyups_read_msg(ngx_event_t *ev)
 {
@@ -2142,12 +2170,13 @@ ngx_http_dyups_read_msg_locked(ngx_event_t *ev)
         return;
     }
 
+    // 遍历 msg 消息队列
     for (q = ngx_queue_last(&sh->msg_queue);
          q != ngx_queue_sentinel(&sh->msg_queue);
          q = ngx_queue_prev(q))
     {
         msg = ngx_queue_data(q, ngx_dyups_msg_t, queue);
-
+        // msg 已经被所有 worker 都处理过，将消息删除
         if (msg->count == ccf->worker_processes) {
             t = ngx_queue_next(q); ngx_queue_remove(q); q = t;
 
@@ -2159,18 +2188,21 @@ ngx_http_dyups_read_msg_locked(ngx_event_t *ev)
             continue;
         }
 
+        // 判断 msg 是否被当前 worker 处理过
         found = 0;
         for (i = 0; i < msg->count; i++) {
 
             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ev->log, 0,
                            "[dyups] msg pids [%P]", msg->pid[i]);
 
+            
             if (msg->pid[i] == ngx_pid) {
                 found = 1;
                 break;
             }
         }
 
+        // 当前消息已经被当前进程处理过，继续处理下一个 msg
         if (found) {
             ngx_log_debug2(NGX_LOG_DEBUG_HTTP, ev->log, 0,
                            "[dyups] msg %V count %ui found",
@@ -2178,6 +2210,8 @@ ngx_http_dyups_read_msg_locked(ngx_event_t *ev)
             continue;
         }
 
+        // 消息未被当前 worker 处理过
+        // 设置处理进程为当前进程，msg 处理次数加一
         msg->pid[i] = ngx_pid;
         msg->count++;
 
@@ -2187,6 +2221,7 @@ ngx_http_dyups_read_msg_locked(ngx_event_t *ev)
         name = msg->name;
         content = msg->content;
 
+        // 执行命令
         rc = ngx_dyups_sync_cmd(pool, &name, &content, msg->flag);
         if (rc != NGX_OK) {
             ngx_log_error(NGX_LOG_ALERT, ev->log, 0,
@@ -2219,6 +2254,7 @@ ngx_http_dyups_send_msg(ngx_str_t *name, ngx_buf_t *body, ngx_uint_t flag)
     sh = ngx_dyups_global_ctx.sh;
     shpool = ngx_dyups_global_ctx.shpool;
 
+    // 创建新消息
     msg = ngx_slab_alloc_locked(shpool, sizeof(ngx_dyups_msg_t));
     if (msg == NULL) {
         goto failed;
@@ -2235,9 +2271,10 @@ ngx_http_dyups_send_msg(ngx_str_t *name, ngx_buf_t *body, ngx_uint_t flag)
         goto failed;
     }
 
+    // 当前 msg 的进程数组
     ngx_memzero(msg->pid, sizeof(ngx_pid_t) * ccf->worker_processes);
-    msg->pid[0] = ngx_pid;
-    msg->count++;
+    msg->pid[0] = ngx_pid; // 当前 worker 已经处理过消息
+    msg->count++;          // 增加计数
 
     msg->name.data = ngx_slab_alloc_locked(shpool, name->len);
     if (msg->name.data == NULL) {
@@ -2272,6 +2309,7 @@ ngx_http_dyups_send_msg(ngx_str_t *name, ngx_buf_t *body, ngx_uint_t flag)
                    "[dyups] send msg %V count %ui version: %ui",
                    &msg->name, msg->count, sh->version);
 
+    // 插入队列
     ngx_queue_insert_head(&sh->msg_queue, &msg->queue);
 
     return NGX_OK;
@@ -2363,15 +2401,14 @@ ngx_http_dyups_set_peer_session(ngx_peer_connection_t *pc, void *data)
     ssl_session = ctx->ssl_session;
     rc = ngx_ssl_set_session(pc->connection, ssl_session);
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                   "set session: %p", ssl_session);
-
-#else
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
                    "set session: %p:%d", ssl_session,
-                   ssl_session ? ssl_session->references : 0);
+#if OPENSSL_VERSION_NUMBER >= 0x10100003L
+                   SSL_get_ref(ssl_session)
+#else
+                   ssl_session ? ssl_session->references : 0
 #endif
+                  );
 
     return rc;
 }
@@ -2390,30 +2427,28 @@ ngx_http_dyups_save_peer_session(ngx_peer_connection_t *pc, void *data)
         return;
     }
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                   "save session: %p", ssl_session);
-
-#else
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
                    "save session: %p:%d", ssl_session,
-                   ssl_session->references);
+#if OPENSSL_VERSION_NUMBER >= 0x10100003L
+                   SSL_get_ref(ssl_session)
+#else
+                   ssl_session->references
 #endif
+                  );
 
     old_ssl_session = ctx->ssl_session;
     ctx->ssl_session = ssl_session;
 
     if (old_ssl_session) {
-
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                       "old session: %p", old_ssl_session);
-
-#else
         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                       "old session: %p:%d", old_ssl_session,
-                       old_ssl_session->references);
+                       "old session: %p:%d",
+                       old_ssl_session,
+#if OPENSSL_VERSION_NUMBER >= 0x10100003L
+                       SSL_get_ref(old_ssl_session)
+#else
+                       old_ssl_session->references
 #endif
+                      );
 
         ngx_ssl_free_session(old_ssl_session);
     }
