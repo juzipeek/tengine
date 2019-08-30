@@ -41,12 +41,13 @@ typedef struct {
     ngx_str_t                      shm_name; // 共享内存名
     ngx_uint_t                     shm_size; // 共享内存大小
     ngx_msec_t                     read_msg_timeout; // 消息处理超时时间
-    ngx_flag_t                     read_msg_log;  // 
+    ngx_flag_t                     read_msg_log;  // 处理过程是否输出日志
 } ngx_http_dyups_main_conf_t;
 
 
 typedef struct {
-    ngx_uint_t                           ref; // 引用计数？
+    // 引用计数，有请求使用加一，请求的 cleanup 中会减一
+    ngx_uint_t                           ref;
     ngx_http_upstream_init_peer_pt       init;
 } ngx_http_dyups_upstream_srv_conf_t;
 
@@ -72,13 +73,17 @@ typedef struct ngx_dyups_status_s {
 typedef struct ngx_dyups_shctx_s {
     ngx_queue_t                          msg_queue;
     ngx_uint_t                           version;
+    // status 进程状态数组
     ngx_dyups_status_t                  *status;
 } ngx_dyups_shctx_t;
 
-// 全局共享内存配置
+// 全局配置
 typedef struct ngx_dyups_global_ctx_s {
+    // 需要每个 worker 初始化 msg_timer
     ngx_event_t                          msg_timer;
+    // 在共享内存初始化阶段已经初始化
     ngx_slab_pool_t                     *shpool;
+    // 在共享内存初始化阶段以及初始化，但是 sh 内部的 status 还未创建
     ngx_dyups_shctx_t                   *sh;
 } ngx_dyups_global_ctx_t;
 
@@ -416,6 +421,7 @@ ngx_http_dyups_init_shm_zone(ngx_shm_zone_t *shm_zone, void *data)
     ngx_slab_pool_t    *shpool;
     ngx_dyups_shctx_t  *sh;
 
+    // 直接使用共享内存作为 slab
     shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
 
     sh = ngx_slab_alloc(shpool, sizeof(ngx_dyups_shctx_t));
@@ -471,6 +477,9 @@ ngx_http_dyups_init(ngx_conf_t *cf)
         return NGX_OK;
     }
 
+    // 遍历所有 upstream{} 块，生成其 dyups 的配置，
+    // 在此之后可以通过 dyups_srv_conf 就可以访问所有 upstream{} 配置
+
     uscfp = umcf->upstreams.elts;
     for (i = 0; i < umcf->upstreams.nelts; i++) {
 
@@ -495,7 +504,8 @@ ngx_http_dyups_init(ngx_conf_t *cf)
         }
     }
 
-    // ngx_http_dyups_deleted_upstream 是给 lua 模块使用？
+    // 在 upstream{} 被删除后设置当前 upstream 块配置为
+    // ngx_http_dyups_deleted_upstream
     /* alloc a dummy upstream */
 
     ngx_memzero(&ngx_http_dyups_deleted_upstream,
@@ -601,13 +611,16 @@ ngx_http_dyups_init_process(ngx_cycle_t *cycle)
     }
 
     // sh->version 不为零说明已经处理过 upstream 新增、删除指令
+    // 在此处处理的特殊情况是：worker 出现异常，master 重新创建 worker，新 woker 走到此处
+    // 简单的在两倍读消息超时时间时间后，根据消息队列中消息更新时间找出无 worker 维护的 status 元素
     if (sh->version != 0) {
         ngx_shmtx_unlock(&shpool->mutex);
 
         ngx_log_error(NGX_LOG_ALERT, cycle->log, 0,
                       "[dyups] process start after abnormal exits");
-        // usleep 为什么要使用 usleep？
-        // 保证其他进程已经触发了指令处理定时器
+
+        // sleep 两倍的读消息间隔，保证所有健康的 worker 都更新过 status 数组。
+        // 之后当前进程可以根据 status 数组中每个元素的更新时间来找出无人使用的 status 元素
         ngx_msleep(dmcf->read_msg_timeout * 2);
 
         ngx_time_update();
@@ -643,6 +656,7 @@ ngx_http_dyups_init_process(ngx_cycle_t *cycle)
                       "[dyups] new process is %P, old process is %P",
                       ngx_pid, pid);
 
+        // 将消息队列中历史 pid 的消息更新为当前 pid
         ngx_dyups_purge_msg(pid, ngx_pid);
     }
 
@@ -650,7 +664,7 @@ ngx_http_dyups_init_process(ngx_cycle_t *cycle)
     return NGX_OK;
 }
 
-
+// 将消息队列中历史 pid 的消息更新为当前 pid
 static void
 ngx_dyups_purge_msg(ngx_pid_t opid, ngx_pid_t npid)
 {
@@ -679,7 +693,8 @@ ngx_dyups_purge_msg(ngx_pid_t opid, ngx_pid_t npid)
     }
 }
 
-
+// 删除所有动态配置
+// 
 static void
 ngx_http_dyups_exit_process(ngx_cycle_t *cycle)
 {
@@ -721,6 +736,7 @@ ngx_http_dyups_interface_handler(ngx_http_request_t *r)
 
     // 查看 upstream 状态指令处理
     if (r->method == NGX_HTTP_GET) {
+        // 消息处理，同步当前 worker 的状态
         ngx_http_dyups_read_msg(timer);
         return ngx_http_dyups_do_get(r, res);
     }
@@ -1042,7 +1058,8 @@ ngx_http_dyups_show_upstream(ngx_http_request_t *r,
     return buf;
 }
 
-
+// 删除消息处理
+// 更新当前 upstream 配置为 ngx_dyups_delete_upstream
 static ngx_int_t
 ngx_dyups_do_delete(ngx_str_t *name, ngx_str_t *rv)
 {
@@ -1145,7 +1162,8 @@ ngx_http_dyups_interface_read_body(ngx_http_request_t *r)
     return NGX_DONE;
 }
 
-
+// 更新操作
+// 首先需要读出包体
 static void
 ngx_http_dyups_body_handler(ngx_http_request_t *r)
 {
@@ -1453,7 +1471,7 @@ ngx_dyups_parse_upstream(ngx_conf_t *cf, ngx_buf_t *buf)
     return rc;
 }
 
-
+// 向 upstream 增加 server
 static ngx_int_t
 ngx_dyups_add_server(ngx_http_dyups_srv_conf_t *duscf, ngx_buf_t *buf)
 {
@@ -1525,14 +1543,15 @@ ngx_dyups_add_server(ngx_http_dyups_srv_conf_t *duscf, ngx_buf_t *buf)
 #endif
 
     dscf = uscf->srv_conf[ngx_http_dyups_module.ctx_index];
-    dscf->init = uscf->peer.init;
+    dscf->init = uscf->peer.init;  	// 保存原始的 peer.init 回调
 
+    // 对 peer.init 阶段进行封装，连接建立时增加 upstream 引用计数
     uscf->peer.init = ngx_http_dyups_init_peer;
 
     return NGX_OK;
 }
 
-
+// upstream 查找
 static ngx_http_dyups_srv_conf_t *
 ngx_dyups_find_upstream(ngx_str_t *name, ngx_int_t *idx)
 {
@@ -1557,6 +1576,7 @@ ngx_dyups_find_upstream(ngx_str_t *name, ngx_int_t *idx)
             continue;
         }
 
+        // 对 NGX_DYUPS_DELETING 状态的 upstream 进行处理
         if (duscf->deleted == NGX_DYUPS_DELETING) {
 
             ngx_log_error(NGX_LOG_DEBUG, ngx_cycle->log, 0,
@@ -1564,6 +1584,7 @@ ngx_dyups_find_upstream(ngx_str_t *name, ngx_int_t *idx)
                           "on %V deleting",
                           i, *(duscf->ref), &duscf->upstream->host);
 
+            // 如果引用计数变为零，则标记为 NGX_DYUPS_DELETED 状态
             if (*(duscf->ref) == 0) {
                 ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
                               "[dyups] free dynamic upstream in find upstream"
@@ -1571,6 +1592,7 @@ ngx_dyups_find_upstream(ngx_str_t *name, ngx_int_t *idx)
 
                 duscf->deleted = NGX_DYUPS_DELETED;
 
+                // 释放内存
                 if (duscf->pool) {
                     ngx_destroy_pool(duscf->pool);
                     duscf->pool = NULL;
@@ -1578,10 +1600,12 @@ ngx_dyups_find_upstream(ngx_str_t *name, ngx_int_t *idx)
             }
         }
 
+        // 再次判断，NGX_DYUPS_DELETING 状态的不应该再使用
         if (duscf->deleted == NGX_DYUPS_DELETING) {
             continue;
         }
-
+		
+        // 如果找不到则使用 NGX_DYUPS_DELETED 状态的配置
         if (duscf->deleted == NGX_DYUPS_DELETED) {
             *idx = i;
             duscf_del = duscf;
@@ -1590,6 +1614,7 @@ ngx_dyups_find_upstream(ngx_str_t *name, ngx_int_t *idx)
 
         uscf = duscf->upstream;
 
+		// 不相同，继续
         if (uscf->host.len != name->len
             || ngx_strncasecmp(uscf->host.data, name->data, uscf->host.len)
                != 0)
@@ -1797,7 +1822,7 @@ ngx_http_dyups_send_response(ngx_http_request_t *r, ngx_int_t status,
     ngx_http_finalize_request(r, ngx_http_output_filter(r, &out));
 }
 
-
+// 读请求包体
 static ngx_buf_t *
 ngx_http_dyups_read_body(ngx_http_request_t *r)
 {
@@ -1832,7 +1857,7 @@ ngx_http_dyups_read_body(ngx_http_request_t *r)
     return body;
 }
 
-
+// 读请求包体
 static ngx_buf_t *
 ngx_http_dyups_read_body_from_file(ngx_http_request_t *r)
 {
@@ -1981,6 +2006,7 @@ ngx_http_dyups_init_peer(ngx_http_request_t *r,
     ctx->free = r->upstream->peer.free;
 
     r->upstream->peer.data = ctx;
+    // 修改连接的 peer.get peer.free 回调
     r->upstream->peer.get = ngx_http_dyups_get_peer;
     r->upstream->peer.free = ngx_http_dyups_free_peer;
 
@@ -1994,8 +2020,10 @@ ngx_http_dyups_init_peer(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
+    // 增加 upstream 引用计数
     dscf->ref++;
 
+    // 注册连接关闭的清理函数：减少 upstream 引用计数
     cln->handler = ngx_http_dyups_clean_request;
     cln->data = &dscf->ref;
 
@@ -2038,6 +2066,8 @@ ngx_http_dyups_free_peer(ngx_peer_connection_t *pc, void *data,
         goto done;
     }
 
+    // 增加引用计数，因为 request 的清理函数会进行引用计数减一操作，
+    // 使用连接池需要保证使用的 upstream 块内存不被释放
     ctx->scf->ref++;
 
     cln = ngx_pool_cleanup_add(pc->connection->pool, 0);
@@ -2117,7 +2147,7 @@ ngx_http_dyups_read_msg(ngx_event_t *ev)
     ngx_dyups_add_timer(ev, dmcf->read_msg_timeout);
 }
 
-
+// 读消息定时器触发
 static void
 ngx_http_dyups_read_msg_locked(ngx_event_t *ev)
 {
@@ -2273,8 +2303,8 @@ ngx_http_dyups_send_msg(ngx_str_t *name, ngx_buf_t *body, ngx_uint_t flag)
 
     // 当前 msg 的进程数组
     ngx_memzero(msg->pid, sizeof(ngx_pid_t) * ccf->worker_processes);
-    msg->pid[0] = ngx_pid; // 当前 worker 已经处理过消息
-    msg->count++;          // 增加计数
+    msg->pid[0] = ngx_pid; // 使用第一槽作为消息发送方，标识当前 worker 已经处理过消息
+    msg->count++;          // 增加处理计数
 
     msg->name.data = ngx_slab_alloc_locked(shpool, name->len);
     if (msg->name.data == NULL) {
@@ -2323,7 +2353,7 @@ failed:
     return NGX_ERROR;
 }
 
-
+// 消息销毁
 static void
 ngx_dyups_destroy_msg(ngx_slab_pool_t *shpool, ngx_dyups_msg_t *msg)
 {
@@ -2342,7 +2372,7 @@ ngx_dyups_destroy_msg(ngx_slab_pool_t *shpool, ngx_dyups_msg_t *msg)
     ngx_slab_free_locked(shpool, msg);
 }
 
-
+// 消息队列命令处理
 static ngx_int_t
 ngx_dyups_sync_cmd(ngx_pool_t *pool, ngx_str_t *name, ngx_str_t *content,
     ngx_uint_t flag)
